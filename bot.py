@@ -117,6 +117,8 @@ def build_cloudinary_transformation():
     # - Calidad (CRF): 22 -> 'quality': 'auto:22'
     # - Resolución: -2:360 -> 'height': 360, 'crop': 'scale'
     # - FPS: 30 -> 'fps': 30
+    # - Preset: 'Veryfast' (no aplicable directamente en Cloudinary)
+    # - Audio Bitrate: 64 (no aplicable directamente, se ajusta con 'quality')
     
     transformations = [
         {'quality': 'auto:22'},
