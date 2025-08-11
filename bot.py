@@ -116,7 +116,6 @@ async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
     # Subir y comprimir con Cloudinary de forma asíncrona para videos grandes
     await status_message.edit_text("🔄 Subiendo video a Cloudinary...")
     try:
-        # NUEVO: Usamos `upload_chunked` para archivos grandes
         upload_result = cloudinary.uploader.upload(
             file_path,
             resource_type="video",
