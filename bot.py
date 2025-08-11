@@ -116,19 +116,21 @@ async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
     # Subir y comprimir con Cloudinary de forma asíncrona para videos grandes
     await status_message.edit_text("🔄 Subiendo video a Cloudinary...")
     try:
+        # NUEVO: Usamos `upload_chunked` para archivos grandes
         upload_result = cloudinary.uploader.upload(
             file_path,
             resource_type="video",
             eager=[
                 {
-                    'quality': 'auto:good',  # Equivalente a un buen balance de CRF
-                    'height': 360,            # Resolución de 360p
-                    'fps': 30,                # 30 cuadros por segundo
-                    'audio_bitrate': '64k',   # 64 kbps de audio
-                    'audio_codec': 'aac'      # Codec de audio AAC
+                    'quality': 'auto:good',
+                    'height': 360,
+                    'fps': 30,
+                    'audio_bitrate': '64k',
+                    'audio_codec': 'aac'
                 }
             ],
-            eager_async=True
+            eager_async=True,
+            chunk_size=10*1024*1024 # Subir en fragmentos de 10 MB
         )
         
         # Obtenemos el job_id para hacer seguimiento
