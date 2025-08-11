@@ -9,7 +9,8 @@ from pyrogram.errors import MessageNotModified, FloodWait
 import nest_asyncio
 import cloudinary
 import cloudinary.uploader
-import httpx # Necesitarás instalar esta librería: pip install httpx
+import cloudinary.api
+import httpx
 
 # Aplicar nest_asyncio para entornos como Jupyter Notebook o Render
 nest_asyncio.apply()
@@ -96,7 +97,7 @@ async def progress_bar_handler(current, total, client, message, start_time, acti
 # --- Lógica de Procesamiento de Video (con Cloudinary) ---
 
 async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
-    """Descarga el video, lo sube a Cloudinary para compresión y devuelve la URL y el tamaño original."""
+    """Descarga el video, lo sube a Cloudinary para compresión asíncrona y devuelve la URL."""
     user_info = user_data.get(chat_id)
     if not user_info: return None, None
 
@@ -112,24 +113,57 @@ async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
         await status_message.edit_text("❌ Error en la descarga del video.")
         return None, None
 
-    # Subir y comprimir con Cloudinary
-    await status_message.edit_text("🔄 Subiendo y comprimiendo con Cloudinary...")
+    # Subir y comprimir con Cloudinary de forma asíncrona para videos grandes
+    await status_message.edit_text("🔄 Subiendo video a Cloudinary...")
     try:
         upload_result = cloudinary.uploader.upload(
             file_path,
             resource_type="video",
-            transformation=[
-                {'quality': 'auto:low'},
-                {'fetch_format': 'auto'}
-            ]
+            eager=[
+                {
+                    'quality': 'auto:good',  # Equivalente a un buen balance de CRF
+                    'height': 360,            # Resolución de 360p
+                    'fps': 30,                # 30 cuadros por segundo
+                    'audio_bitrate': '64k',   # 64 kbps de audio
+                    'audio_codec': 'aac'      # Codec de audio AAC
+                }
+            ],
+            eager_async=True
         )
-        compressed_url = upload_result['secure_url']
+        
+        # Obtenemos el job_id para hacer seguimiento
+        eager_info = upload_result.get('eager', [{}])[0]
+        job_id = eager_info.get('resource_id')
+        if not job_id:
+            compressed_url = eager_info.get('secure_url')
+            if compressed_url:
+                original_size = os.path.getsize(file_path)
+                return compressed_url, original_size
+            else:
+                raise Exception("Cloudinary no devolvió un job_id válido ni una URL de compresión inmediata.")
+
+        await update_message(client, chat_id, status_message.id, f"✅ Subida exitosa. Solicitando compresión a Cloudinary...")
+
+        # Bucle de espera para la compresión
+        status = None
+        while status != "complete":
+            await asyncio.sleep(5)
+            # Consultamos el estado del trabajo de compresión
+            result = cloudinary.api.resource(upload_result['public_id'], transformations=True)
+            status = result['eager'][0]['status']
+            await update_message(client, chat_id, status_message.id, f"✅ Subida exitosa. Comprimiendo en Cloudinary... Estado: **{status}**")
+            
+            if status == "failed":
+                raise Exception("La compresión en Cloudinary falló.")
+        
+        # Una vez completado, obtenemos la URL final
+        compressed_url = result['eager'][0]['secure_url']
         original_size = os.path.getsize(file_path)
         
         return compressed_url, original_size
     except Exception as e:
         logger.error(f"Error al subir a Cloudinary: {e}", exc_info=True)
-        await status_message.edit_text("❌ Error al subir y comprimir el video en Cloudinary.")
+        await status_message.edit_text(f"❌ Error al procesar el video en Cloudinary: {e}")
         return None, None
     finally:
         if os.path.exists(file_path):
