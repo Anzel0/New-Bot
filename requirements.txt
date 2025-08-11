@@ -3,4 +3,4 @@ tgcrypto
 nest_asyncio
 psutil
 cloudinary
-gunicorn
+httpx
