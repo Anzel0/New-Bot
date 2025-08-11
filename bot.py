@@ -330,19 +330,16 @@ def clean_up(chat_id):
     logger.info(f"Datos del usuario {chat_id} limpiados.")
 
 async def main():
-    logger.info("Terminando procesos antiguos...")
-    for proc in psutil.process_iter(['pid', 'name']):
-        if any(keyword in proc.info['name'].lower() for keyword in ['ffmpeg', 'python']):
-            try: proc.terminate()
-            except psutil.Error: pass
     logger.info("Iniciando bot...")
     await app.start()
     me = await app.get_me()
-    logger.info(f"Bot en línea como @{me.username}. Presiona Ctrl+C para detener.")
-    await asyncio.Future()
+    logger.info(f"Bot en línea como @{me.username}.")
+    # Mantiene el proceso activo indefinidamente
+    while True:
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        app.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot detenido manualmente.")
