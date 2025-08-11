@@ -117,17 +117,13 @@ async def progress_bar_handler(current, total, client, message, start_time, acti
 # --- Lógica de Procesamiento de Video (con Cloudinary) ---
 def build_cloudinary_transformation(options):
     """Construye el objeto de transformación de Cloudinary a partir de las opciones del usuario."""
-    quality_option = options.get('quality', 'auto:low')
+    quality_param = options.get('quality', 'auto:low')
     resolution = options.get('resolution', '360')
     
     transformations = [
-        {'quality': quality_option, 'fetch_format': 'auto'},
+        {'quality': quality_param},
         {'height': resolution, 'crop': 'scale'},
     ]
-    
-    # Cloudinary no soporta 'preset' o 'fps' directamente en la transformación.
-    # 'quality:auto' se encarga de la compresión.
-    # La resolución es la única opción de tamaño que tiene sentido aplicar.
     
     return transformations
 
@@ -170,7 +166,7 @@ async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
         return compressed_url, original_size
     except Exception as e:
         logger.error(f"Error al subir a Cloudinary: {e}", exc_info=True)
-        await status_message.edit_text("❌ Error al subir y comprimir el video en Cloudinary.")
+        await status_message.edit_text(f"❌ Error al subir y comprimir el video en Cloudinary: {e}")
         return None, None
     finally:
         # Limpiar el archivo descargado localmente
@@ -324,7 +320,7 @@ async def callback_handler(client, cb: CallbackQuery):
             clean_up(chat_id)
 
     elif action == "compressopt_advanced":
-        user_info['compression_options'] = {} # Reinicia las opciones para la configuración avanzada
+        user_info['compression_options'] = {} 
         await show_advanced_menu(client, chat_id, cb.message.id, "quality")
 
     elif action.startswith("adv_"):
@@ -386,7 +382,7 @@ async def show_compression_options(client, chat_id, msg_id):
 
 async def show_advanced_menu(client, chat_id, msg_id, part, opts=None):
     menus = {
-        "quality": {"text": "1/2: Calidad (RFC)", "opts": [("18", "auto:18"), ("22", "auto:22"), ("28", "auto:28")], "prefix": "adv_quality"},
+        "quality": {"text": "1/2: Calidad (RFC)", "opts": [("18", "auto:18"), ("20", "auto:20"), ("22", "auto:22"), ("25", "auto:25"), ("28", "auto:28")], "prefix": "adv_quality"},
         "resolution": {"text": "2/2: Resolución", "opts": [("240p", "240"), ("360p", "360"), ("480p", "480"), ("720p", "720"), ("1080p", "1080")], "prefix": "adv_resolution"},
     }
     if part == "confirm":
