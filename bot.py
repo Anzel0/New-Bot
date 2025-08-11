@@ -4,16 +4,15 @@
 import os
 import psutil
 import time
-import re
 import asyncio
 import logging
+import urllib.parse
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified, FloodWait
 import nest_asyncio
 import cloudinary
 import cloudinary.uploader
-import urllib.parse
 
 # =======================================================
 # LÓGICA DE TU BOT
@@ -94,8 +93,7 @@ async def progress_bar_handler(current, total, client, message, start_time, acti
     last_update_time = user_info.get('last_update_time', 0)
     current_time = time.time()
 
-    if current_time - last_update_time < 3:
-        return
+    if current_time - last_update_time < 3: return
     user_info['last_update_time'] = current_time
 
     percentage = (current * 100 / total) if total > 0 else 0
@@ -117,18 +115,20 @@ async def progress_bar_handler(current, total, client, message, start_time, acti
     await update_message(client, chat_id, message.id, text)
 
 # --- Lógica de Procesamiento de Video (con Cloudinary) ---
-
 def build_cloudinary_transformation(options):
     """Construye el objeto de transformación de Cloudinary a partir de las opciones del usuario."""
-    crf_quality = {'28': '28', '25': '25', '22': '22', '20': '20', '18': '18'}.get(options.get('crf', '22'))
+    quality_option = options.get('quality', 'auto:low')
     resolution = options.get('resolution', '360')
-    preset = options.get('preset', 'veryfast')
-
+    
     transformations = [
-        {'quality': f'auto:{crf_quality}'},
-        {'width': resolution, 'crop': 'scale', 'fetch_format': 'auto'},
-        {'flag': 'any_format'},  # Para asegurar la conversión de formato
+        {'quality': quality_option, 'fetch_format': 'auto'},
+        {'height': resolution, 'crop': 'scale'},
     ]
+    
+    # Cloudinary no soporta 'preset' o 'fps' directamente en la transformación.
+    # 'quality:auto' se encarga de la compresión.
+    # La resolución es la única opción de tamaño que tiene sentido aplicar.
+    
     return transformations
 
 async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
@@ -177,30 +177,6 @@ async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
         if os.path.exists(file_path):
             os.remove(file_path)
 
-async def download_video(client, chat_id, status_message):
-    """Descarga el video original del usuario. Se usa en el modo "convertir"."""
-    user_info = user_data.get(chat_id)
-    if not user_info:
-        return None
-    user_info['state'] = 'downloading'
-    start_time = time.time()
-    original_message = await client.get_messages(chat_id, user_info['original_message_id'])
-    try:
-        video_path = await client.download_media(
-            message=original_message,
-            file_name=os.path.join(DOWNLOAD_DIR, f"{chat_id}_{user_info['video_file_name']}"),
-            progress=progress_bar_handler,
-            progress_args=(client, status_message, start_time, "📥 Descargando")
-        )
-        if not video_path or not os.path.exists(video_path):
-            await update_message(client, chat_id, status_message.id, "❌ Error en la descarga.")
-            return None
-        return video_path
-    except Exception as e:
-        logger.error(f"Error al descargar para {chat_id}: {e}", exc_info=True)
-        await update_message(client, chat_id, status_message.id, "❌ Error en la descarga.")
-        return None
-
 async def upload_final_video(client, chat_id, url_or_path, original_size=None):
     """Sube el video procesado final a Telegram."""
     user_info = user_data.get(chat_id)
@@ -244,8 +220,8 @@ async def upload_final_video(client, chat_id, url_or_path, original_size=None):
     finally:
         clean_up(chat_id)
 
-# --- Handlers de Mensajes y Callbacks ---
 
+# --- Handlers de Mensajes y Callbacks ---
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     clean_up(message.chat.id)
@@ -260,7 +236,7 @@ async def video_handler(client, message: Message):
     if user_data.get(chat_id):
         await client.send_message(chat_id, "⚠️ Un proceso anterior se ha cancelado para iniciar uno nuevo.")
         clean_up(chat_id)
-
+        
     if message.video.file_size > MAX_VIDEO_SIZE_MB * 1024 * 1024:
         await message.reply(f"❌ El video supera el límite de {MAX_VIDEO_SIZE_MB} MB.")
         return
@@ -311,7 +287,6 @@ async def rename_handler(client, message: Message):
     user_info['state'] = 'uploading'
     await upload_final_video(client, chat_id, user_info['final_url_or_path'], user_info.get('original_size'))
 
-
 @app.on_callback_query()
 async def callback_handler(client, cb: CallbackQuery):
     chat_id = cb.message.chat.id
@@ -331,36 +306,38 @@ async def callback_handler(client, cb: CallbackQuery):
         clean_up(chat_id)
 
     elif action == "action_compress":
-        user_info['action'] = 'compress'
-        user_info['compression_options'] = {'crf': '22', 'resolution': '360', 'preset': 'veryfast'}
         await show_compression_options(client, chat_id, cb.message.id)
 
     elif action == "compressopt_default":
-        user_info['compression_options'] = {'crf': '22', 'resolution': '360', 'preset': 'veryfast'}
+        user_info['compression_options'] = {'quality': 'auto:low', 'resolution': '360'}
         await cb.message.edit("Iniciando compresión con opciones por defecto...")
         compressed_url, original_size = await upload_and_compress_with_cloudinary(client, chat_id, cb.message)
         if compressed_url:
             user_info['final_url_or_path'] = compressed_url
             user_info['original_size'] = original_size
             summary = (f"✅ **Compresión Exitosa**\n\n"
-                    f"**📏 Original:** `{format_size(original_size)}`\n"
-                    f"**📂 Comprimido:** (`{urllib.parse.urlparse(compressed_url).path.split('/')[-1]}`)\n\n"
-                    f"Ahora, ¿cómo quieres continuar?")
+                       f"**📏 Original:** `{format_size(original_size)}`\n"
+                       f"Ahora, ¿cómo quieres continuar?")
             await show_conversion_options(client, chat_id, cb.message.id, text=summary)
         else:
             await cb.message.edit("❌ Error en la compresión. Operación cancelada.")
             clean_up(chat_id)
 
     elif action == "compressopt_advanced":
-        await show_advanced_menu(client, chat_id, cb.message.id, "crf")
+        user_info['compression_options'] = {} # Reinicia las opciones para la configuración avanzada
+        await show_advanced_menu(client, chat_id, cb.message.id, "quality")
 
     elif action.startswith("adv_"):
         part, value = action.split("_")[1], action.split("_")[2]
         user_info.setdefault('compression_options', {})[part] = value
-        next_part_map = {"crf": "resolution", "resolution": "confirm"} # Ya no usamos preset
+        
+        next_part_map = {"quality": "resolution", "resolution": "confirm"}
         next_part = next_part_map.get(part)
+        
         if next_part:
             await show_advanced_menu(client, chat_id, cb.message.id, next_part, user_info['compression_options'])
+        else:
+             await show_advanced_menu(client, chat_id, cb.message.id, "confirm", user_info['compression_options'])
 
     elif action == "start_advanced_compression":
         await cb.message.edit("Opciones guardadas. Iniciando compresión...")
@@ -369,14 +346,13 @@ async def callback_handler(client, cb: CallbackQuery):
             user_info['final_url_or_path'] = compressed_url
             user_info['original_size'] = original_size
             summary = (f"✅ **Compresión Exitosa**\n\n"
-                    f"**📏 Original:** `{format_size(original_size)}`\n"
-                    f"**📂 Comprimido:** (`{urllib.parse.urlparse(compressed_url).path.split('/')[-1]}`)\n\n"
-                    f"Ahora, ¿cómo quieres continuar?")
+                       f"**📏 Original:** `{format_size(original_size)}`\n"
+                       f"Ahora, ¿cómo quieres continuar?")
             await show_conversion_options(client, chat_id, cb.message.id, text=summary)
         else:
             await cb.message.edit("❌ Error en la compresión. Operación cancelada.")
             clean_up(chat_id)
-
+            
     elif action == "convertopt_withthumb":
         user_info['state'] = 'waiting_for_thumbnail'
         await cb.message.edit("Por favor, envía la imagen para la miniatura.")
@@ -410,12 +386,12 @@ async def show_compression_options(client, chat_id, msg_id):
 
 async def show_advanced_menu(client, chat_id, msg_id, part, opts=None):
     menus = {
-        "crf": {"text": "1/2: Calidad (CRF)", "opts": [("18", "18"), ("20", "20"), ("22", "22"), ("25", "25"), ("28", "28")], "prefix": "adv_crf"},
-        "resolution": {"text": "2/2: Resolución", "opts": [("1080p", "1080"), ("720p", "720"), ("480p", "480"), ("360p", "360"), ("240p", "240")], "prefix": "adv_resolution"},
+        "quality": {"text": "1/2: Calidad (RFC)", "opts": [("18", "auto:18"), ("22", "auto:22"), ("28", "auto:28")], "prefix": "adv_quality"},
+        "resolution": {"text": "2/2: Resolución", "opts": [("240p", "240"), ("360p", "360"), ("480p", "480"), ("720p", "720"), ("1080p", "1080")], "prefix": "adv_resolution"},
     }
     if part == "confirm":
         text = (f"Confirmar opciones:\n"
-                f"- Calidad (CRF): `{opts.get('crf', 'N/A')}`\n"
+                f"- Calidad (RFC): `{opts.get('quality', 'N/A').split(':')[-1]}`\n"
                 f"- Resolución: `{opts.get('resolution', 'N/A')}p`\n"
                 f"\n¿Estás listo para iniciar la compresión?")
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Iniciar Compresión", callback_data="start_advanced_compression")]])
@@ -425,7 +401,6 @@ async def show_advanced_menu(client, chat_id, msg_id, part, opts=None):
         keyboard = InlineKeyboardMarkup([buttons])
         text = info["text"]
     await update_message(client, chat_id, msg_id, text, reply_markup=keyboard)
-
 
 async def show_conversion_options(client, chat_id, msg_id, text="¿Cómo quieres enviar el video?"):
     keyboard = InlineKeyboardMarkup([
