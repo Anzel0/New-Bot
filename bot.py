@@ -119,9 +119,9 @@ def build_cloudinary_transformation():
     # - FPS: 30 -> 'fps': 30
     
     transformations = [
-        **{'quality': 'auto:22'}**,
-        **{'height': 360, 'crop': 'scale'}**,
-        **{'fps': 30}**
+        {'quality': 'auto:22'},
+        {'height': 360, 'crop': 'scale'},
+        {'fps': 30}
     ]
     
     return transformations
