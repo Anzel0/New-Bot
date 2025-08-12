@@ -3,14 +3,11 @@ import psutil
 import time
 import asyncio
 import logging
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified, FloodWait
 import nest_asyncio
-import cloudinary
-import cloudinary.uploader
-import cloudinary.api
-import httpx
 
 # Aplicar nest_asyncio para entornos como Jupyter Notebook o Render
 nest_asyncio.apply()
@@ -31,17 +28,6 @@ user_data = {}
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME")
-CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY")
-CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET")
-
-# Inicializar Cloudinary con tus credenciales
-cloudinary.config(
-    cloud_name=CLOUDINARY_CLOUD_NAME,
-    api_key=CLOUDINARY_API_KEY,
-    api_secret=CLOUDINARY_API_SECRET
-)
 
 # --- Instancia del Bot ---
 app = Client("video_processor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -94,10 +80,10 @@ async def progress_bar_handler(current, total, client, message, start_time, acti
     )
     await update_message(client, chat_id, message.id, text)
 
-# --- Lógica de Procesamiento de Video (con Cloudinary) ---
+# --- Lógica de Procesamiento de Video (con FFmpeg) ---
 
-async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
-    """Descarga el video, lo sube a Cloudinary para compresión asíncrona y devuelve la URL."""
+async def compress_video_with_ffmpeg(client, chat_id, status_message):
+    """Descarga el video, lo comprime con FFmpeg y devuelve la ruta del archivo comprimido."""
     user_info = user_data.get(chat_id)
     if not user_info: return None, None
 
@@ -113,88 +99,58 @@ async def upload_and_compress_with_cloudinary(client, chat_id, status_message):
         await status_message.edit_text("❌ Error en la descarga del video.")
         return None, None
 
-    # Subir y comprimir con Cloudinary de forma asíncrona para videos grandes
-    await status_message.edit_text("🔄 Subiendo video a Cloudinary...")
+    # Comprimir video con FFmpeg
+    await status_message.edit_text("🔄 Comprimiendo video con FFmpeg...")
+    original_size = os.path.getsize(file_path)
+    compressed_file_path = os.path.join(DOWNLOAD_DIR, f"compressed_{chat_id}.mp4")
+
+    # Comando de FFmpeg con los parámetros solicitados
+    command = [
+        'ffmpeg',
+        '-i', file_path,
+        '-vf', 'scale=-2:360',  # Resolución: 360p, ancho automático
+        '-crf', '22',           # Calidad: CRF 22 (más bajo, mejor calidad, más grande)
+        '-r', '30',             # FPS: 30
+        '-b:a', '64k',          # Bitrate de audio: 64k
+        '-c:v', 'libx264',      # Codec de video (h264)
+        '-c:a', 'aac',          # Codec de audio (aac)
+        '-movflags', '+faststart', # Optimiza para streaming
+        '-y',                   # Sobrescribe el archivo de salida si existe
+        compressed_file_path
+    ]
+
     try:
-        upload_result = cloudinary.uploader.upload(
-            file_path,
-            resource_type="video",
-            eager=[
-                {
-                    'quality': 'auto:good',
-                    'height': 360,
-                    'fps': 30,
-                    'audio_bitrate': '64k',
-                    'audio_codec': 'aac'
-                }
-            ],
-            eager_async=True,
-            chunk_size=10*1024*1024 # Subir en fragmentos de 10 MB
+        # Usamos asyncio.create_subprocess_exec para no bloquear el bot
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
+        stdout, stderr = await proc.communicate()
         
-        # Obtenemos el job_id para hacer seguimiento
-        eager_info = upload_result.get('eager', [{}])[0]
-        job_id = eager_info.get('resource_id')
-        if not job_id:
-            compressed_url = eager_info.get('secure_url')
-            if compressed_url:
-                original_size = os.path.getsize(file_path)
-                return compressed_url, original_size
-            else:
-                raise Exception("Cloudinary no devolvió un job_id válido ni una URL de compresión inmediata.")
-
-        await update_message(client, chat_id, status_message.id, f"✅ Subida exitosa. Solicitando compresión a Cloudinary...")
-
-        # Bucle de espera para la compresión
-        status = None
-        while status != "complete":
-            await asyncio.sleep(5)
-            # Consultamos el estado del trabajo de compresión
-            result = cloudinary.api.resource(upload_result['public_id'], transformations=True)
-            status = result['eager'][0]['status']
-            await update_message(client, chat_id, status_message.id, f"✅ Subida exitosa. Comprimiendo en Cloudinary... Estado: **{status}**")
-            
-            if status == "failed":
-                raise Exception("La compresión en Cloudinary falló.")
+        if proc.returncode != 0:
+            error_msg = stderr.decode().strip()
+            logger.error(f"Error en FFmpeg: {error_msg}")
+            raise Exception(f"Fallo la compresión. Error: {error_msg}")
         
-        # Una vez completado, obtenemos la URL final
-        compressed_url = result['eager'][0]['secure_url']
-        original_size = os.path.getsize(file_path)
-        
-        return compressed_url, original_size
+        return compressed_file_path, original_size
     except Exception as e:
-        logger.error(f"Error al subir a Cloudinary: {e}", exc_info=True)
-        await status_message.edit_text(f"❌ Error al procesar el video en Cloudinary: {e}")
+        logger.error(f"Error en el proceso de FFmpeg: {e}", exc_info=True)
+        await status_message.edit_text(f"❌ Error al comprimir el video: {e}")
         return None, None
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
 
-async def download_from_url(url, path):
-    """Descarga un archivo desde una URL de forma asíncrona."""
-    async with httpx.AsyncClient() as client:
-        async with client.stream('GET', url) as response:
-            response.raise_for_status()
-            with open(path, 'wb') as f:
-                async for chunk in response.aiter_bytes():
-                    f.write(chunk)
-    return path
-
-async def upload_final_video(client, chat_id, url, original_size=None):
-    """Descarga el video comprimido y lo sube a Telegram."""
+async def upload_final_video(client, chat_id, final_video_path, original_size=None):
+    """Sube el video comprimido a Telegram."""
     user_info = user_data.get(chat_id)
     if not user_info: return
 
     status_id = user_info['status_message_id']
     status_message = await client.get_messages(chat_id, status_id)
     
-    final_video_path = None
     try:
-        # Descargamos el video comprimido de Cloudinary
-        await update_message(client, chat_id, status_id, "⬇️ Descargando video comprimido...")
-        final_video_path = os.path.join(DOWNLOAD_DIR, f"compressed_{chat_id}.mp4")
-        await download_from_url(url, final_video_path)
-
         # Subimos el video a Telegram
         start_time = time.time()
         await update_message(client, chat_id, status_id, "⬆️ SUBIENDO...")
@@ -270,9 +226,9 @@ async def callback_handler(client, cb: CallbackQuery):
         clean_up(chat_id)
     elif action == "action_compress":
         await cb.message.edit("Iniciando el proceso de compresión...")
-        compressed_url, original_size = await upload_and_compress_with_cloudinary(client, chat_id, cb.message)
-        if compressed_url:
-            await upload_final_video(client, chat_id, compressed_url, original_size)
+        compressed_file_path, original_size = await compress_video_with_ffmpeg(client, chat_id, cb.message)
+        if compressed_file_path:
+            await upload_final_video(client, chat_id, compressed_file_path, original_size)
         else:
             await cb.message.edit("❌ Error en la compresión. Operación cancelada.")
             clean_up(chat_id)
@@ -281,7 +237,7 @@ async def callback_handler(client, cb: CallbackQuery):
 def clean_up(chat_id):
     user_info = user_data.pop(chat_id, None)
     if not user_info: return
-    for key in ['download_path', 'thumbnail_path', 'final_path']:
+    for key in ['download_path', 'final_path']:
         path = user_info.get(key)
         if path and os.path.exists(path):
             try: os.remove(path)
